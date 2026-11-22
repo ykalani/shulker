@@ -69,7 +69,9 @@ test("project markers and fingerprints distinguish artifacts from same-name user
     join(root, "nested/app/node_modules"),
     join(root, "nested/python/environment-local"),
   ].sort());
-  assert(result.candidates.every(({ size }) => size > 0));
+  const environment = result.candidates.find(({ path }) => path.endsWith("environment-local"));
+  const marker = await fs.stat(join(environment.path, "pyvenv.cfg"));
+  assert.equal(environment.size, process.platform === "win32" ? marker.size : marker.blocks * 512);
 });
 
 test("exclusions protect the containing folder and custom paths stay review-only", async (t) => {

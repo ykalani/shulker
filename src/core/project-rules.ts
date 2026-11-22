@@ -308,7 +308,8 @@ export async function discoverProjectCandidates(
           }
         }
       }
-      if (label && complete && bytes > 0) {
+      // Some filesystems report zero allocated blocks for small resident files.
+      if (label && complete) {
         const candidate = { path, size: bytes, dir: true, label };
         labelsCache.set(`d${key}`, label);
         candidates.push(candidate);
@@ -327,7 +328,7 @@ export async function discoverProjectCandidates(
         try {
           const stat = await fs.lstat(child);
           const candidate = { path: child, size: fileBytes(stat), dir: false, label };
-          if (!stat.isFile() || candidate.size <= 0) continue;
+          if (!stat.isFile()) continue;
           candidates.push(candidate);
           options.onCandidate?.(candidate);
         } catch {
