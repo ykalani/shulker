@@ -1,6 +1,6 @@
 {
   "name": "shulker",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Explore your disk and review cleanup candidates on Windows, macOS, and Linux.",
   "keywords": [
     "macos",
@@ -48,6 +48,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
     "typescript": "^5.9.3"
   },
   "engines": {

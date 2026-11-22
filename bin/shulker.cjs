@@ -1,10 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const path = require("node:path");
-
 const args = process.argv.slice(2);
-const appDir = path.resolve(__dirname, "..");
 
 const HELP = `Shulker explores disk usage and finds cleanup candidates.
 
@@ -21,11 +18,17 @@ Usage: shulker [options]
   --path <dir>   Scan only this existing directory.
   --docker       Show Docker disk usage.
   --docker-prune Review and prune dangling Docker images using Docker's prompt.
+  --version      Show the Shulker version.
   -h, --help     Show this help.
 `;
 
 if (args.includes("-h") || args.includes("--help")) {
   process.stdout.write(HELP);
+  process.exit(0);
+}
+
+if (args.length === 1 && args[0] === "--version") {
+  process.stdout.write(require("../package.json").version + "\n");
   process.exit(0);
 }
 
@@ -58,14 +61,14 @@ if (args.includes("--docker") || args.includes("--docker-prune")) {
   if (args.length !== 1) {
     fail("Use --docker or --docker-prune on its own.");
   } else {
-    require(path.join(appDir, "dist", "core", "docker-cleanup.js"))
+    require("../dist/core/docker-cleanup.js")
       .runDockerCleanup(args[0] === "--docker" ? "usage" : "prune").catch(fail);
   }
 } else if (args.includes("--plain") || args.includes("--json") || args.includes("--drives") ||
     !process.stdout.isTTY || !process.stdin.isTTY) {
-  require(path.join(appDir, "dist", "plain.js"))
+  require("../dist/plain.js")
     .runPlain(args)
     .catch(fail);
 } else {
-  require(path.join(appDir, "dist", "main.js"));
+  require("../dist/main.js");
 }

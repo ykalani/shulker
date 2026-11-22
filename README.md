@@ -4,6 +4,10 @@ Shulker is a terminal dashboard for exploring disk usage and reviewing cleanup c
 
 ## Run it
 
+On Windows, download the x64 or ARM64 ZIP from the [latest GitHub release](https://github.com/ykalani/shulker/releases/latest), extract it, and run `shulker.exe --demo` from a terminal. The Windows executable includes its runtime.
+
+### Run from source
+
 Install Git and Node.js 22 or later, then run these commands in a terminal:
 
 ```powershell
@@ -48,3 +52,5 @@ Create `~/.shulker.json` or point `SHULKER_CONFIG` at a configuration file. Rule
 ## Development and credits
 
 Run `npm test` to compile and test the app. The repository preserves fix-storage's upstream history and MIT license. Project detection draws from Kondo and Disco. The Windows cache allowlist and protection policy draw from [cull](https://github.com/legostin/cull) and [cleaner](https://github.com/vyrti/cleaner). [sweeprs](https://github.com/salamaashoush/sweeprs) informed deduplication and tool-managed cleanup. [gdu](https://github.com/dundee/gdu) informed user exclusions and Git review context.
+
+On Windows ARM64 with x64 emulation and PowerShell 7, run `npm ci` and then `./scripts/package-windows.ps1 -Staging .tmp/sea -Destination .tmp/release` to build and smoke-test both portable ZIPs.
