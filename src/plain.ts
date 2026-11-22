@@ -2,18 +2,17 @@ import { CATEGORIES, TIER_LABEL } from "./core/categories";
 import { demoDrives, demoLayout, demoSpace, startDemoScan } from "./core/demo";
 import { describePartition, listDrives, mountCommand, pickDrive, type Drive, type Partition } from "./core/drives";
 import { capacity, gb, size, tilde } from "./core/format";
-import { layoutFor, type Layout } from "./core/layout";
+import { layoutFor, scopedLayout, type Layout } from "./core/layout";
 import { IS_MAC } from "./core/platform";
 import { diskSpace, startScan, type ScanSnapshot } from "./core/scan";
 
 /** The value given with --drive, as `--drive x` or `--drive=x`. */
-export function driveArg(args: string[]): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--drive") return args[i + 1];
-    if (args[i].startsWith("--drive=")) return args[i].slice("--drive=".length);
-  }
-  return undefined;
+function option(args: string[], name: string): string | undefined {
+  const index = args.findIndex((arg) => arg === name || arg.startsWith(name + "="));
+  return index < 0 ? undefined : args[index] === name ? args[index + 1] : args[index].slice(name.length + 1);
 }
+export const driveArg = (args: string[]) => option(args, "--drive");
+export const pathArg = (args: string[]) => option(args, "--path");
 
 /** Text and JSON output, for terminals without graphics and for scripts. Never deletes anything. */
 export async function runPlain(args: string[]): Promise<void> {
@@ -27,10 +26,12 @@ export async function runPlain(args: string[]): Promise<void> {
     return;
   }
 
-  const wanted = driveArg(args);
+  const path = pathArg(args);
+  const wanted = path ?? driveArg(args);
   const drive = pickDrive(wanted, drives);
-  if (!drive) throw new Error(`no drive matches ${wanted}; fix-storage --drives lists them`);
-  const layout = demo ? demoLayout(drive) : await layoutFor(drive);
+  if (!drive) throw new Error(`no drive matches ${wanted}; shulker --drives lists them`);
+  const base = demo ? demoLayout(drive) : await layoutFor(drive);
+  const layout = path && !demo ? await scopedLayout(base, path) : base;
   const start = demo ? startDemoScan : startScan;
   const live = process.stderr.isTTY === true;
 
@@ -96,7 +97,7 @@ function drivesText(drives: Drive[], spaces: Array<{ total: number; used: number
       lines.push(`    ${described[i].padEnd(wide)}  ${capacity(p.size).padStart(8)}    ${mountCommand(p)}`);
     });
   }
-  if (!IS_MAC && drives.length > 1) lines.push("", "Scan one with fix-storage --drive <number, name or path>.");
+  if (!IS_MAC && drives.length > 1) lines.push("", "Scan one with shulker --drive <number, name or path>.");
   return lines.join("\n") + "\n";
 }
 
@@ -105,6 +106,7 @@ export function toJson(scan: ScanSnapshot, layout: Layout): string {
     JSON.stringify(
       {
         drive: { ...driveInfo(layout.drive), lookOnly: layout.lookOnly },
+        scope: layout.scope,
         total: scan.total,
         used: scan.used,
         available: scan.available,
@@ -162,6 +164,6 @@ export function toText(scan: ScanSnapshot, layout: Layout, driveCount: number): 
     for (const path of scan.blocked.slice(0, 8)) lines.push(`  ${tilde(path)}`);
     if (scan.blocked.length > 8) lines.push(`  and ${scan.blocked.length - 8} more`);
   }
-  if (!IS_MAC && driveCount > 1) lines.push("", `${driveCount} drives mounted · fix-storage --drives lists them`);
+  if (!IS_MAC && driveCount > 1) lines.push("", `${driveCount} drives mounted · shulker --drives lists them`);
   return lines.join("\n") + "\n";
 }

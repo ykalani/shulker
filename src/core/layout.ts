@@ -1,9 +1,11 @@
 import { promises as fsp, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { roots as macRoots, type CategoryId, type Root } from "./categories";
 import { canonical, MAC_DRIVE, mountOf, readMounts, type Drive } from "./drives";
-import { IS_MAC } from "./platform";
+import { insidePath, IS_MAC, IS_WINDOWS } from "./platform";
+import { windowsCacheRoots } from "./cleanup-policy";
+import { verifyWindowsPath } from "./windows";
 
 /** How one drive is measured: its folders and categories, and what may be removed from it. */
 export interface Layout {
@@ -11,6 +13,8 @@ export interface Layout {
   home: string;
   /** Folders the scan measures, and the category each one counts toward. */
   roots: Root[];
+  /** A subtree selected with --path, when the volume is not being scanned in full. */
+  scope?: string;
   /** Why nothing on this drive may be removed, or null when the usual rules apply. */
   lookOnly: string | null;
   /** True for a folder where a different drive is mounted. */
@@ -159,7 +163,7 @@ const FOLDER_KIND: Array<[RegExp, CategoryId]> = [
   [/^(steamlibrary|steam|games|lutris|heroic|epic games|gog games)$/i, "apps"],
 ];
 
-/** A Windows system partition, seen from Linux. */
+/** The standard Windows system and profile folders on one volume. */
 async function windowsRoots(top: string): Promise<Root[]> {
   const t = (...parts: string[]) => join(top, ...parts);
   const roots: Root[] = [
@@ -246,6 +250,26 @@ const realpath = (path: string) => {
 /** Works out which folders to measure on a drive and what may be removed from it. */
 export async function layoutFor(drive: Drive, home: string = homedir()): Promise<Layout> {
   if (IS_MAC) return macLayout(home);
+  if (IS_WINDOWS) {
+    const roots: Root[] = drive.system ? (await windowsRoots(drive.mount)).filter((root) => root.category !== "caches") : [
+      { path: drive.mount, category: "documents" },
+      { path: join(drive.mount, "$Recycle.Bin"), category: "trash" },
+    ];
+    if (drive.home && !drive.system) roots.push({ path: home, category: "documents", hidden: "developer" });
+    const unique = new Map<string, Root>();
+    for (const root of [...roots, ...windowsCacheRoots()]) {
+      if (root.path.toLowerCase() === drive.mount.toLowerCase() || insidePath(root.path, drive.mount)) {
+        unique.set(root.path.toLowerCase(), root);
+      }
+    }
+    return {
+      drive, home, roots: [...unique.values()],
+      lookOnly: drive.readOnly ? "the Recycle Bin is available only on fixed NTFS drives" : null,
+      foreign: (path) => path.toLowerCase() !== drive.mount.toLowerCase() && !insidePath(path, drive.mount),
+      skip: () => false,
+      canonical: (path) => resolve(path),
+    };
+  }
 
   const all = readMounts();
   const byPoint = new Map(all.map((m) => [m.point, m]));
@@ -331,4 +355,19 @@ export async function layoutFor(drive: Drive, home: string = homedir()): Promise
     skip: (path) => foreign(path) || alias(path),
     canonical: (path) => (own.length > 1 ? canonical(path, all) : path),
   };
+}
+
+/** Keeps a selected directory and its nested category roots, on the same volume. */
+export async function scopedLayout(layout: Layout, path: string): Promise<Layout> {
+  const scope = resolve(path);
+  if (IS_WINDOWS) await verifyWindowsPath(scope);
+  if (layout.foreign(scope) || !(await fsp.lstat(scope)).isDirectory()) throw new Error("Choose a directory on the selected drive.");
+  if (layout.drive.mount === scope || (IS_WINDOWS && layout.drive.mount.toLowerCase() === scope.toLowerCase())) {
+    return layout;
+  }
+  const enclosing = layout.roots.filter((root) => insidePath(scope, root.path) ||
+    (IS_WINDOWS ? scope.toLowerCase() === root.path.toLowerCase() : scope === root.path))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  const roots = layout.roots.filter((root) => insidePath(root.path, scope));
+  return { ...layout, scope, roots: [{ path: scope, category: enclosing?.category ?? "documents" }, ...roots] };
 }

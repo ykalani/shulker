@@ -4,7 +4,9 @@ import { basename, join } from "node:path";
 import { CATEGORIES, type CategoryId, type Root } from "./categories";
 import type { Drive } from "./drives";
 import type { Layout } from "./layout";
-import { IS_MAC } from "./platform";
+import { fileBytes, insidePath, IS_MAC, IS_WINDOWS } from "./platform";
+import { windowsUsage } from "./windows";
+import { windowsCache } from "./cleanup-policy";
 
 export interface Item {
   path: string;
@@ -63,7 +65,8 @@ export interface Space {
 }
 
 export async function diskSpace(drive?: Drive): Promise<Space> {
-  const paths = IS_MAC || !drive ? ["/System/Volumes/Data", "/"] : [drive.mount];
+  const paths = IS_WINDOWS ? [drive?.mount ?? (process.env.SystemDrive ?? "C:") + "\\"] :
+    IS_MAC || !drive ? ["/System/Volumes/Data", "/"] : [drive.mount];
   for (const path of paths) {
     try {
       const s = await fsp.statfs(path);
@@ -90,7 +93,8 @@ interface DuResult {
 }
 
 /** Disk usage of one folder via du, which is far faster than walking it in JS. */
-export function du(path: string, children: Set<ChildProcess>): Promise<DuResult> {
+export function du(path: string, children: Set<ChildProcess>, cancelled?: () => boolean): Promise<DuResult> {
+  if (IS_WINDOWS) return windowsUsage(path, cancelled);
   return new Promise((resolve) => {
     const child = spawn("du", ["-skx", path], { stdio: ["ignore", "pipe", "pipe"] });
     children.add(child);
@@ -173,11 +177,9 @@ export function startScan(layout: Layout, onUpdate: (snapshot: ScanSnapshot) => 
     emit(true);
 
     const all = layout.roots;
-    const rootPaths = new Set(all.map((r) => r.path));
-    const holdsRoot = (path: string) => {
-      const prefix = path + "/";
-      return all.some((r) => r.path.startsWith(prefix));
-    };
+    const key = (path: string) => IS_WINDOWS ? path.toLowerCase() : path;
+    const rootPaths = new Set(all.map((r) => key(r.path)));
+    const holdsRoot = (path: string) => all.some((r) => insidePath(r.path, path));
 
     const units: Unit[] = [];
 
@@ -187,7 +189,8 @@ export function startScan(layout: Layout, onUpdate: (snapshot: ScanSnapshot) => 
     const addFile = async (path: string, category: CategoryId) => {
       try {
         const stat = await fsp.lstat(path);
-        const bytes = stat.blocks * 512;
+        if (IS_WINDOWS && !stat.isFile()) return;
+        const bytes = fileBytes(stat);
         add(category, bytes);
         if (bytes > 0) snap.items[category].push({ path, size: bytes, dir: false });
       } catch {
@@ -204,6 +207,7 @@ export function startScan(layout: Layout, onUpdate: (snapshot: ScanSnapshot) => 
       if (cancelled) return;
       let entries;
       try {
+        if (IS_WINDOWS && (await fsp.lstat(path)).isSymbolicLink()) return;
         entries = await fsp.readdir(path, { withFileTypes: true });
       } catch (error) {
         // A root can be a single file, like a swap file.
@@ -213,7 +217,7 @@ export function startScan(layout: Layout, onUpdate: (snapshot: ScanSnapshot) => 
       }
       for (const entry of entries) {
         const child = join(path, entry.name);
-        if (rootPaths.has(child) || layout.skip(child)) continue;
+        if (rootPaths.has(key(child)) || layout.skip(child) || (IS_WINDOWS && entry.isSymbolicLink())) continue;
         const kind = hidden !== undefined && entry.name.startsWith(".") ? hidden : category;
         if (entry.isDirectory()) {
           if (holdsRoot(child)) await expand(child, kind);
@@ -228,7 +232,11 @@ export function startScan(layout: Layout, onUpdate: (snapshot: ScanSnapshot) => 
     const sorted: Root[] = [...all].sort((a, b) => order.indexOf(a.category) - order.indexOf(b.category));
     for (const root of sorted) {
       snap.current = root.path;
-      await expand(root.path, root.category, root.hidden);
+      if (IS_WINDOWS && root.category === "caches" && root.path !== layout.scope && windowsCache(root.path)) {
+        units.push({ path: root.path, category: root.category });
+      } else {
+        await expand(root.path, root.category, root.hidden);
+      }
       emit();
     }
 
@@ -238,7 +246,7 @@ export function startScan(layout: Layout, onUpdate: (snapshot: ScanSnapshot) => 
         const unit = units[next++];
         snap.current = unit.path;
         emit();
-        const result = await du(unit.path, children);
+        const result = await du(unit.path, children, () => cancelled);
         if (cancelled) return;
         add(unit.category, result.bytes);
         if (result.bytes > 0) snap.items[unit.category].push({ path: unit.path, size: result.bytes, dir: true });
@@ -255,7 +263,7 @@ export function startScan(layout: Layout, onUpdate: (snapshot: ScanSnapshot) => 
     // not read.
     const after = await diskSpace(layout.drive);
     if (after.total > 0) Object.assign(snap, after);
-    snap.sizes.system += unmeasuredBytes(snap);
+    if (!layout.scope) snap.sizes.system += unmeasuredBytes(snap);
     snap.current = "";
     snap.phase = "done";
     emit(true);

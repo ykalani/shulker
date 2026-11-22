@@ -1,17 +1,17 @@
 # Security policy
 
-fix-storage reads your whole disk and can delete files, so bugs that make it remove the wrong thing are treated as security issues.
+Shulker reads disk usage and can move or delete files. Report unexpected changes privately.
 
 ## Reporting
 
 Please **don't open a public issue** for:
 
-- anything that makes fix-storage delete or move files it shouldn't (outside the folders it scans, protected folders, or without the second confirmation)
+- removal outside the scan scope, removal of a protected file, or removal without confirmation
 - `--dry-run` or `--demo` changing anything on disk
 - problems with the install script
 
-Report it privately through [GitHub security advisories](https://github.com/govijr/fix-storage/security/advisories/new). Include your OS version (and Linux distribution), the command you ran, and the path involved. You'll get a reply within a few days.
+Report it privately through [GitHub security advisories](https://github.com/ykalani/shulker/security/advisories/new). Include your OS version, the command you ran, and the affected path with personal information removed.
 
 ## Supported versions
 
-Only the latest release gets fixes. Update with the install command in the [README](README.md).
+Use the current version from the [README](README.md).

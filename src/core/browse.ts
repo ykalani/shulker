@@ -1,13 +1,16 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promises as fsp } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CategoryId } from "./categories";
 import { isWhole, type Usage } from "./classify";
 import { homeTrash, type Layout } from "./layout";
-import { IS_MAC, OS_NAME } from "./platform";
+import { fileBytes, insidePath, IS_MAC, IS_WINDOWS, OS_NAME } from "./platform";
 import { du, type Item } from "./scan";
 import { forgetTrashInfo, trashLinux } from "./trash";
+import { canRecyclePath, windowsCache } from "./cleanup-policy";
+import { recycleWindows, windowsUsage } from "./windows";
+import { cleanupExclusion, recheckProjectCandidate } from "./project-rules";
 
 export interface ListHandle {
   cancel(): void;
@@ -22,7 +25,7 @@ const known = new Map<string, number>();
 /** Drops remembered sizes for a path, everything inside it, and every folder above it. */
 export function forgetSizes(path: string) {
   for (const key of known.keys()) {
-    if (key === path || key.startsWith(path + "/") || path.startsWith(key + "/")) known.delete(key);
+    if (key === path || insidePath(key, path) || insidePath(path, key)) known.delete(key);
   }
 }
 
@@ -49,6 +52,7 @@ export function listFolder(
   const run = async () => {
     let entries;
     try {
+      if (IS_WINDOWS && (await fsp.lstat(path)).isSymbolicLink()) throw new Error("Link skipped");
       entries = await fsp.readdir(path, { withFileTypes: true });
     } catch {
       if (!cancelled) onUpdate([], true, "");
@@ -63,7 +67,8 @@ export function listFolder(
       }
       try {
         const stat = await fsp.lstat(child);
-        items.push({ path: child, size: stat.blocks * 512, dir: false });
+        if (IS_WINDOWS && !stat.isFile()) continue;
+        items.push({ path: child, size: fileBytes(stat), dir: false });
       } catch {
         // vanished
       }
@@ -76,7 +81,7 @@ export function listFolder(
       while (!cancelled && next < folders.length) {
         const folder = folders[next++];
         const cached = known.get(folder);
-        const bytes = cached ?? (await du(folder, children)).bytes;
+        const bytes = cached ?? (await du(folder, children, () => cancelled)).bytes;
         if (cancelled) return;
         items.push({ path: folder, size: bytes, dir: true });
         onUpdate(sorted(), false, folder);
@@ -115,9 +120,16 @@ const DEPTH = 12;
  */
 export function findCulprit(path: string, onDone: (culprit: Culprit) => void): ListHandle {
   let cancelled = false;
-  const child = spawn("du", ["-kx", "-d", String(DEPTH), path], { stdio: ["ignore", "pipe", "ignore"] });
   const sizes = new Map<string, number>();
   const kids = new Map<string, Item[]>();
+  const remember = (dir: string, bytes: number) => {
+    sizes.set(dir, bytes);
+    if (dir === path) return;
+    const parent = dirname(dir);
+    const list = kids.get(parent) ?? [];
+    list.push({ path: dir, size: bytes, dir: true });
+    kids.set(parent, list);
+  };
   let buffer = "";
   const take = (line: string) => {
     const tab = line.indexOf("\t");
@@ -126,19 +138,8 @@ export function findCulprit(path: string, onDone: (culprit: Culprit) => void): L
     const dir = line.slice(tab + 1);
     if (!Number.isFinite(kb)) return;
     const bytes = kb * 1024;
-    sizes.set(dir, bytes);
-    if (dir === path) return;
-    const parent = dirname(dir);
-    const list = kids.get(parent) ?? [];
-    list.push({ path: dir, size: bytes, dir: true });
-    kids.set(parent, list);
+    remember(dir, bytes);
   };
-  child.stdout.on("data", (chunk: Buffer) => {
-    buffer += chunk.toString();
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) take(line);
-  });
 
   const finish = async () => {
     if (cancelled) return;
@@ -150,7 +151,7 @@ export function findCulprit(path: string, onDone: (culprit: Culprit) => void): L
     let currentSize = sizes.get(path) ?? 0;
     for (let depth = 0; depth < DEPTH; depth++) {
       const best = (kids.get(current) ?? []).reduce<Item | null>((a, b) => (!a || b.size > a.size ? b : a), null);
-      if (!best || best.size < currentSize * DOMINANT) break;
+      if (!best || best.size <= 0 || best.size < currentSize * DOMINANT) break;
       chain.push(best);
       current = best.path;
       currentSize = best.size;
@@ -166,8 +167,22 @@ export function findCulprit(path: string, onDone: (culprit: Culprit) => void): L
     const top = [...(kids.get(path) ?? []), ...(await looseFiles(path))].sort((a, b) => b.size - a.size).slice(0, 3);
     if (!cancelled) onDone({ chain, top });
   };
+  if (IS_WINDOWS) {
+    const rootDepth = path.split(sep).length;
+    void windowsUsage(path, () => cancelled, (dir, bytes) => {
+      if (dir.split(sep).length - rootDepth <= DEPTH) remember(dir, bytes);
+    }).then(finish);
+    return { cancel: () => { cancelled = true; } };
+  }
+
+  const child = spawn("du", ["-kx", "-d", String(DEPTH), path], { stdio: ["ignore", "pipe", "ignore"] });
+  child.stdout.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString();
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) take(line);
+  });
   child.on("close", () => void finish());
-  child.on("error", () => void finish());
 
   return {
     cancel() {
@@ -189,7 +204,8 @@ async function looseFiles(path: string): Promise<Item[]> {
     if (entry.isDirectory()) continue;
     try {
       const stat = await fsp.lstat(join(path, entry.name));
-      files.push({ path: join(path, entry.name), size: stat.blocks * 512, dir: false });
+      if (IS_WINDOWS && !stat.isFile()) continue;
+      files.push({ path: join(path, entry.name), size: fileBytes(stat), dir: false });
     } catch {
       // vanished
     }
@@ -380,11 +396,23 @@ const LINUX_MANAGED = [
 ];
 
 /** Why an item cannot be removed, or null when it can. */
-export function cannotRemove(path: string, layout: Layout): string | null {
-  if (!path.startsWith("/")) return "Not a real path.";
+export function cannotRemove(path: string, layout: Layout, allowArtifact = false): string | null {
+  if (!isAbsolute(path)) return "Not a real path.";
   if (layout.lookOnly) return capitalize(layout.lookOnly) + ".";
   // Judge a second view of a folder (a bind mount) by the folder it shows.
   const target = layout.canonical(resolve(path));
+  const excluded = cleanupExclusion(target);
+  if (excluded) return excluded;
+  if (IS_WINDOWS) {
+    const cache = windowsCache(target);
+    if (!canRecyclePath(target, !!cache)) return "Protected by Windows or the application that owns this data.";
+    if (layout.foreign(target) || layout.scope?.toLowerCase() === target.toLowerCase() ||
+        !layout.roots.some((root) => insidePath(target, root.path) ||
+          (!!cache && root.category === "caches" && root.path.toLowerCase() === target.toLowerCase()))) {
+      return "Outside the folders this tool looks at.";
+    }
+    return cache || allowArtifact ? null : "Windows cleanup requires a verified project artifact or named cache.";
+  }
   if (protectedPaths(layout).has(target)) return `${OS_NAME} or your account needs this folder.`;
   if (IS_MAC) {
     if (target.startsWith("/System/") || target.startsWith("/private/")) return "macOS manages this.";
@@ -394,7 +422,7 @@ export function cannotRemove(path: string, layout: Layout): string | null {
     if (target.startsWith(flatpak + "/")) return "Flatpak manages this · use flatpak uninstall.";
     if (layout.foreign(target)) return "Another drive is mounted here.";
   }
-  const known = layout.roots.some((root) => target.startsWith(resolve(root.path) + sep));
+  const known = layout.roots.some((root) => insidePath(target, root.path));
   if (!known) return "Outside the folders this tool looks at.";
   return null;
 }
@@ -403,7 +431,7 @@ const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1
 
 /** True when the item lives where permanent deletion is fine: caches and the Trash. */
 export function deletesForGood(category: CategoryId): boolean {
-  return category === "caches" || category === "trash";
+  return !IS_WINDOWS && (category === "caches" || category === "trash");
 }
 
 function run(file: string, args: string[]): Promise<void> {
@@ -419,7 +447,18 @@ function run(file: string, args: string[]): Promise<void> {
  * Moves a file or folder to the Trash, where it can be put back from Finder or
  * the file manager, and returns roughly where it went.
  */
-export async function moveToTrash(path: string, layout: Layout): Promise<string> {
+export async function moveToTrash(path: string, layout: Layout, allowArtifact = false): Promise<string> {
+  if (IS_WINDOWS) {
+    const blocked = cannotRemove(path, layout, allowArtifact);
+    if (blocked) throw new Error(blocked);
+    if (!windowsCache(path)) {
+      const info = await fsp.lstat(path);
+      const label = await recheckProjectCandidate({ path, size: fileBytes(info), dir: info.isDirectory() }, layout.foreign);
+      if (!label || label.cleanup === "blocked") throw new Error("Cleanup evidence changed. Rescan and review this item.");
+    }
+    await recycleWindows(path);
+    return "Recycle Bin";
+  }
   if (!IS_MAC) return trashLinux(path, layout.home);
   try {
     await fsp.access("/usr/bin/trash");
@@ -441,6 +480,7 @@ export async function moveToTrash(path: string, layout: Layout): Promise<string>
 
 /** Where moving an item to the Trash puts it, near enough to list it there (and for dry runs). */
 export function trashPathFor(path: string, layout: Layout): string {
+  if (IS_WINDOWS) return "Recycle Bin";
   if (IS_MAC) return join(layout.home, ".Trash", basename(path));
   if (layout.drive.home) return join(homeTrash(layout.home), "files", basename(path));
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
@@ -449,6 +489,9 @@ export function trashPathFor(path: string, layout: Layout): string {
 
 /** Deletes for good. Only used for caches and things already in the Trash. */
 export async function deleteForGood(path: string, category: CategoryId): Promise<void> {
+  if (IS_WINDOWS) throw new Error("Use Explorer to empty the Recycle Bin.");
+  const excluded = cleanupExclusion(path);
+  if (excluded) throw new Error(excluded);
   await fsp.rm(path, { recursive: true, force: true });
   if (!IS_MAC && category === "trash") await forgetTrashInfo(path);
 }
@@ -458,6 +501,17 @@ export async function deleteForGood(path: string, category: CategoryId): Promise
  * selected (Nautilus, Dolphin, Nemo, Thunar), else just opens its folder.
  */
 export async function reveal(path: string): Promise<void> {
+  if (IS_WINDOWS) {
+    await new Promise<void>((done, fail) => {
+      const child = spawn("explorer.exe", ["/select,", path], { detached: true, stdio: "ignore" });
+      child.on("error", fail);
+      child.on("spawn", () => {
+        child.unref();
+        done();
+      });
+    });
+    return;
+  }
   if (IS_MAC) return run("open", ["-R", path]);
   const uri = pathToFileURL(path).href.replace(/,/g, "%2C");
   try {

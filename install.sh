@@ -1,25 +1,25 @@
 #!/bin/sh
-# fix-storage installer
+# shulker installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/govijr/fix-storage/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ykalani/shulker/main/install.sh | sh
 #
 # Options (pass after `sh -s --`):
 #   --version <x.y.z>   install a specific release instead of the latest
-#   --uninstall         remove fix-storage
+#   --uninstall         remove shulker
 #
 # Environment:
-#   FIX_STORAGE_HOME     where the app lives        (default: ~/.fix-storage)
-#   FIX_STORAGE_BIN      where the command is linked (default: ~/.local/bin)
-#   FIX_STORAGE_REPO     GitHub repo to install from (default: govijr/fix-storage)
-#   FIX_STORAGE_TARBALL  install from this local .tgz or URL instead of a release
+#   SHULKER_HOME     where the app lives        (default: ~/.shulker)
+#   SHULKER_BIN      where the command is linked (default: ~/.local/bin)
+#   SHULKER_REPO     GitHub repo to install from (default: ykalani/shulker)
+#   SHULKER_TARBALL  install from this local .tgz or URL instead of a release
 #
 # Nothing here needs sudo. Everything installs into your home folder.
 
 set -eu
 
-REPO="${FIX_STORAGE_REPO:-govijr/fix-storage}"
-APP_HOME="${FIX_STORAGE_HOME:-$HOME/.fix-storage}"
-BIN_DIR="${FIX_STORAGE_BIN:-$HOME/.local/bin}"
+REPO="${SHULKER_REPO:-ykalani/shulker}"
+APP_HOME="${SHULKER_HOME:-$HOME/.shulker}"
+BIN_DIR="${SHULKER_BIN:-$HOME/.local/bin}"
 MIN_NODE_MAJOR=20
 MIN_NODE_MINOR=11
 
@@ -38,26 +38,26 @@ fail() { printf '%serror:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 uninstall() {
   step "removing $APP_HOME"
   rm -rf "$APP_HOME"
-  if [ -L "$BIN_DIR/fix-storage" ]; then
-    step "removing $BIN_DIR/fix-storage"
-    rm -f "$BIN_DIR/fix-storage"
+  if [ -L "$BIN_DIR/shulker" ]; then
+    step "removing $BIN_DIR/shulker"
+    rm -f "$BIN_DIR/shulker"
   fi
-  say "${GREEN}fix-storage is uninstalled.${RESET}"
+  say "${GREEN}shulker is uninstalled.${RESET}"
 }
 
 check_platform() {
   case "$(uname -s)" in
     Darwin) OS="macos" ;;
     Linux) OS="linux" ;;
-    *) fail "fix-storage runs on macOS and Linux." ;;
+    *) fail "shulker runs on macOS and Linux." ;;
   esac
   case "$(uname -m)" in
     x86_64 | amd64 | arm64 | aarch64) ;;
-    *) fail "fix-storage needs a 64-bit Intel/AMD or ARM computer; this one is $(uname -m)." ;;
+    *) fail "shulker needs a 64-bit Intel/AMD or ARM computer; this one is $(uname -m)." ;;
   esac
   if [ "$OS" = "linux" ]; then
     # The graphics runtime is downloaded as a zip.
-    command -v unzip >/dev/null 2>&1 || fail "fix-storage needs unzip. Install it with your package manager, e.g.
+    command -v unzip >/dev/null 2>&1 || fail "shulker needs unzip. Install it with your package manager, e.g.
        sudo apt install unzip   or   sudo dnf install unzip   or   sudo pacman -S unzip"
   fi
 }
@@ -71,14 +71,14 @@ node_hint() {
 }
 
 check_node() {
-  command -v node >/dev/null 2>&1 || fail "fix-storage needs Node.js ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} or newer.
+  command -v node >/dev/null 2>&1 || fail "shulker needs Node.js ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} or newer.
        Install it with:  $(node_hint)"
   command -v npm >/dev/null 2>&1 || fail "npm was not found. It normally comes with Node.js; on some Linux systems it is a separate package."
   version="$(node -p 'process.versions.node')"
   major="$(printf '%s' "$version" | cut -d. -f1)"
   minor="$(printf '%s' "$version" | cut -d. -f2)"
   if [ "$major" -lt "$MIN_NODE_MAJOR" ] || { [ "$major" -eq "$MIN_NODE_MAJOR" ] && [ "$minor" -lt "$MIN_NODE_MINOR" ]; }; then
-    fail "fix-storage needs Node.js ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} or newer; you have $version.
+    fail "shulker needs Node.js ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} or newer; you have $version.
        Update it with:  $(node_hint)"
   fi
 }
@@ -105,21 +105,21 @@ latest_version() {
 }
 
 tarball_url() {
-  if [ -n "${FIX_STORAGE_TARBALL:-}" ]; then
-    printf '%s' "$FIX_STORAGE_TARBALL"
+  if [ -n "${SHULKER_TARBALL:-}" ]; then
+    printf '%s' "$SHULKER_TARBALL"
   else
-    printf 'https://github.com/%s/releases/download/v%s/fix-storage.tgz' "$REPO" "${VERSION#v}"
+    printf 'https://github.com/%s/releases/download/v%s/shulker.tgz' "$REPO" "${VERSION#v}"
   fi
 }
 
 # Checks a download against the .sha256 file published next to it. Releases
 # always publish one, so for them a missing checksum is an error; a custom
-# FIX_STORAGE_TARBALL URL is checked only when it has one.
+# SHULKER_TARBALL URL is checked only when it has one.
 verify() {
   file="$1"
   url="$2"
   if ! curl -fsL --retry 3 -o "$file.sha256" "$url.sha256"; then
-    [ -n "${FIX_STORAGE_TARBALL:-}" ] || fail "could not download the checksum $url.sha256"
+    [ -n "${SHULKER_TARBALL:-}" ] || fail "could not download the checksum $url.sha256"
     warn "no checksum at $url.sha256; installing unverified"
     return 0
   fi
@@ -135,7 +135,7 @@ install() {
   check_platform
   check_node
 
-  if [ -z "$VERSION" ] && [ -z "${FIX_STORAGE_TARBALL:-}" ]; then
+  if [ -z "$VERSION" ] && [ -z "${SHULKER_TARBALL:-}" ]; then
     VERSION="$(latest_version)"
   fi
   source="$(tarball_url)"
@@ -145,14 +145,14 @@ install() {
   case "$source" in
     http://* | https://*)
       step "downloading ${source}"
-      curl -fsSL --retry 3 -o "$tmp/fix-storage.tgz" "$source" ||
+      curl -fsSL --retry 3 -o "$tmp/shulker.tgz" "$source" ||
         fail "could not download $source
        Check the version exists at https://github.com/$REPO/releases"
-      verify "$tmp/fix-storage.tgz" "$source"
+      verify "$tmp/shulker.tgz" "$source"
       ;;
     *)
       [ -f "$source" ] || fail "no such file: $source"
-      cp "$source" "$tmp/fix-storage.tgz"
+      cp "$source" "$tmp/shulker.tgz"
       ;;
   esac
 
@@ -163,12 +163,12 @@ install() {
   mkdir -p "$staging"
   # npm 12 skips dependency install scripts unless allowScripts names them, and
   # pixel's postinstall is what fetches the graphics runtime.
-  printf '{ "name": "fix-storage-install", "private": true, "allowScripts": { "@zenbu-labs/pixel": true } }\n' >"$staging/package.json"
+  printf '{ "name": "shulker-install", "private": true }\n' >"$staging/package.json"
   # The graphics runtime unpacks in the temp folder and then moves into place,
   # which fails when /tmp is on another filesystem (tmpfs on most Linux
   # systems). A temp folder next to the install keeps it on the same one.
   mkdir -p "$staging/.tmp"
-  if ! (cd "$staging" && TMPDIR="$staging/.tmp" npm install --omit=dev --no-fund --no-audit --loglevel=error "$tmp/fix-storage.tgz" >"$tmp/npm.log" 2>&1); then
+  if ! (cd "$staging" && TMPDIR="$staging/.tmp" npm install --omit=dev --no-fund --no-audit --loglevel=error "$tmp/shulker.tgz" >"$tmp/npm.log" 2>&1); then
     cat "$tmp/npm.log" >&2
     rm -rf "$staging"
     fail "npm install failed (log above)."
@@ -178,14 +178,14 @@ install() {
   mv "$staging" "$APP_HOME"
 
   mkdir -p "$BIN_DIR"
-  ln -sf "$APP_HOME/node_modules/.bin/fix-storage" "$BIN_DIR/fix-storage"
-  installed="$(node -p "require('$APP_HOME/node_modules/fix-storage/package.json').version")"
+  ln -sf "$APP_HOME/node_modules/.bin/shulker" "$BIN_DIR/shulker"
+  installed="$(node -p "require('$APP_HOME/node_modules/shulker/package.json').version")"
 
   say ""
-  say "${GREEN}${BOLD}fix-storage ${installed} is installed.${RESET}"
+  say "${GREEN}${BOLD}shulker ${installed} is installed.${RESET}"
   case ":$PATH:" in
     *":$BIN_DIR:"*)
-      say "Run ${BOLD}fix-storage${RESET} to see what is filling your disk."
+      say "Run ${BOLD}shulker${RESET} to see what is filling your disk."
       ;;
     *)
       say ""
@@ -205,10 +205,10 @@ install() {
           ;;
       esac
       say ""
-      say "Then run ${BOLD}fix-storage${RESET}."
+      say "Then run ${BOLD}shulker${RESET}."
       ;;
   esac
-  say "${DIM}Tip: fix-storage --dry-run lets you try everything without deleting anything.${RESET}"
+  say "${DIM}Tip: shulker --dry-run lets you try everything without deleting anything.${RESET}"
 }
 
 VERSION=""

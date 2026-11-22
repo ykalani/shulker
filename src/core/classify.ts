@@ -1,6 +1,8 @@
 import { basename, extname } from "node:path";
 import type { CategoryId } from "./categories";
-import { IS_MAC } from "./platform";
+import { canRecyclePath, isProtectedPath, windowsCache } from "./cleanup-policy";
+import { IS_MAC, IS_WINDOWS } from "./platform";
+import { ambiguousArtifactName, projectLabel } from "./project-rules";
 import type { Item } from "./scan";
 
 /**
@@ -22,6 +24,7 @@ export interface Label {
   verdict: Verdict;
   /** Short, lowercase reason, e.g. "rebuilds with npm install". */
   reason: string;
+  cleanup?: "blocked" | "review" | "rebuildable";
 }
 
 const DAY = 24 * 3600 * 1000;
@@ -123,8 +126,8 @@ function systemReason(path: string): string {
 
 /** Decides what an item probably is, from its name, where it lives, and when it was last used. */
 export function classify(item: Item, category: CategoryId, usage?: Usage, now: number = Date.now()): Label {
-  const path = item.path;
-  const name = basename(path);
+  const path = IS_WINDOWS ? item.path.replace(/\\/g, "/") : item.path;
+  const name = basename(item.path);
   const lower = name.toLowerCase();
   const ext = extname(lower);
   const since = idle(usage, now);
@@ -132,15 +135,19 @@ export function classify(item: Item, category: CategoryId, usage?: Usage, now: n
     since !== null && usage && since > 30 * DAY ? ` · ${usage.kind === "opened" ? "not opened" : "not touched"} in ${age(since)}` : "";
 
   if (category === "system") return { verdict: "system", reason: systemReason(path) };
+  if (isProtectedPath(item.path) && !canRecyclePath(item.path, true)) {
+    return { verdict: "system", cleanup: "blocked", reason: systemReason(path) };
+  }
+  const project = projectLabel(item);
+  if (project) return project;
+  const namedCache = IS_WINDOWS && windowsCache(item.path);
+  if (namedCache) return { verdict: "junk", reason: `${namedCache.label} · the application can recreate it` };
   if (category === "trash") return { verdict: "junk", reason: "already in the trash" };
   if (path.includes("/SoftwareDistribution/Download"))
     return { verdict: "junk", reason: "windows update downloads · disk cleanup in windows clears them" };
   if (category === "caches") return { verdict: "junk", reason: "cache · apps rebuild it when they need it" };
 
-  // Things that rebuild themselves.
-  if (lower === "node_modules") return { verdict: "junk", reason: `rebuilds with npm install${untouched}` };
-  if (BUILD_CACHES.has(lower)) return { verdict: "junk", reason: `build cache · rebuilds itself${untouched}` };
-  if (lower === "pods" && item.dir) return { verdict: "junk", reason: `rebuilds with pod install${untouched}` };
+  // Platform-managed caches have dedicated paths; generic project names need markers.
   if (path.includes("/Xcode/DerivedData")) return { verdict: "junk", reason: "xcode build products · rebuild on next build" };
   if (path.includes("/iOS DeviceSupport/") || path.includes("/watchOS DeviceSupport/"))
     return { verdict: "junk", reason: "debug symbols for one device os · xcode fetches them again" };
@@ -152,10 +159,6 @@ export function classify(item: Item, category: CategoryId, usage?: Usage, now: n
   if (INSTALLERS.has(ext)) return { verdict: "junk", reason: `installer · not needed once installed${untouched}` };
 
   // Probably not needed, but yours to decide.
-  if ((lower === "target" || lower === "dist" || lower === "build" || lower === "out") && item.dir && path.includes("/"))
-    return { verdict: "unused", reason: `build output · rebuilds from source${untouched}` };
-  if ((lower === ".venv" || lower === "venv" || lower === "env") && item.dir)
-    return { verdict: "unused", reason: `python environment · recreate with pip install${untouched}` };
   if (path.includes("/CoreSimulator/Devices/")) return { verdict: "unused", reason: `simulator device${untouched}` };
   if (path.includes("/Xcode/Archives/")) return { verdict: "unused", reason: `old app archive${untouched}` };
   if (path.includes("/MobileSync/Backup/")) return { verdict: "unused", reason: `iphone or ipad backup${untouched}` };
@@ -183,6 +186,8 @@ export function classify(item: Item, category: CategoryId, usage?: Usage, now: n
     return { verdict: "system", reason: "virtual machines · remove them in virt-manager" };
   if (!IS_MAC && /^\/(opt|usr\/local)(\/|$)/.test(path))
     return { verdict: "system", reason: "installed software · uninstall it with your package manager" };
+
+  if (item.dir && ambiguousArtifactName(item.path)) return { verdict: "yours", reason: "" };
 
   // Nothing about the name says junk; fall back to how long it has sat there.
   if (since !== null && usage) {

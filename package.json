@@ -1,7 +1,7 @@
 {
-  "name": "fix-storage",
+  "name": "shulker",
   "version": "0.1.0",
-  "description": "See what is filling your disk on macOS or Linux, find the culprit, and clear what is safe to clear, from the terminal.",
+  "description": "Explore your disk and review cleanup candidates on Windows, macOS, and Linux.",
   "keywords": [
     "macos",
     "linux",
@@ -16,19 +16,19 @@
     "du",
     "node_modules"
   ],
-  "homepage": "https://github.com/govijr/fix-storage#readme",
+  "homepage": "https://github.com/ykalani/shulker#readme",
   "bugs": {
-    "url": "https://github.com/govijr/fix-storage/issues"
+    "url": "https://github.com/ykalani/shulker/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/govijr/fix-storage.git"
+    "url": "git+https://github.com/ykalani/shulker.git"
   },
   "license": "MIT",
   "author": "the fix-storage authors",
   "main": "dist/main.js",
   "bin": {
-    "fix-storage": "bin/fix-storage.cjs"
+    "shulker": "bin/shulker.cjs"
   },
   "files": [
     "bin",
@@ -39,34 +39,24 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "tsc -p tsconfig.json && node bin/fix-storage.cjs",
-    "demo": "tsc -p tsconfig.json && node bin/fix-storage.cjs --demo",
-    "plain": "tsc -p tsconfig.json && node bin/fix-storage.cjs --plain",
+    "start": "tsc -p tsconfig.json && node bin/shulker.cjs",
+    "demo": "tsc -p tsconfig.json && node bin/shulker.cjs --demo",
+    "plain": "tsc -p tsconfig.json && node bin/shulker.cjs --plain",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run build",
-    "clean": "rm -rf dist"
-  },
-  "dependencies": {
-    "@zenbu-labs/pixel": "^0.3.1",
-    "react": "^18.3.1"
+    "test": "npm run build && node --test test/*.test.cjs"
   },
   "devDependencies": {
-    "@types/node": "^26.6.6",
-    "@types/react": "^18.3.0",
-    "typescript": "^7.0.2"
-  },
-  "trustedDependencies": [
-    "@zenbu-labs/pixel"
-  ],
-  "allowScripts": {
-    "@zenbu-labs/pixel": true
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
   },
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   },
   "os": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
   ],
   "cpu": [
     "arm64",

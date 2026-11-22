@@ -10,8 +10,6 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
-    env:
-      PIXEL_SKIP_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -33,8 +31,8 @@ jobs:
       - name: Pack
         run: |
           npm pack
-          mv fix-storage-*.tgz fix-storage.tgz
-          shasum -a 256 fix-storage.tgz > fix-storage.tgz.sha256
+          mv shulker-*.tgz shulker.tgz
+          shasum -a 256 shulker.tgz > shulker.tgz.sha256
 
       - name: Release notes from CHANGELOG.md
         run: |
@@ -50,8 +48,8 @@ jobs:
 
           ### Install or update
 
-          ```bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+          ```sh
+          npm install --global https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/shulker.tgz
           ```
           NOTES
 
@@ -60,6 +58,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            fix-storage.tgz fix-storage.tgz.sha256 install.sh \
-            --title "fix-storage $GITHUB_REF_NAME" \
+            shulker.tgz shulker.tgz.sha256 install.sh \
+            --title "shulker $GITHUB_REF_NAME" \
             --notes-file notes.md

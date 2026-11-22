@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { IS_MAC } from "./platform";
+import { insidePath, IS_MAC, IS_WINDOWS } from "./platform";
+import { windowsDrives } from "./windows";
 
 /** One line of /proc/self/mountinfo: a filesystem, or part of one, mounted somewhere. */
 export interface Mount {
@@ -219,6 +220,23 @@ const ORDER: Record<DriveKind, number> = { main: 0, data: 1, windows: 2, linux: 
  */
 export async function listDrives(home: string = homedir()): Promise<{ drives: Drive[]; unmounted: Partition[] }> {
   if (IS_MAC) return { drives: [MAC_DRIVE], unmounted: [] };
+  if (IS_WINDOWS) {
+    const system = (process.env.SystemDrive ?? "C:").toLowerCase();
+    const drives: Drive[] = (await windowsDrives()).map((volume) => {
+      const device = volume.Name.slice(0, 2);
+      const isSystem = device.toLowerCase() === system;
+      const isHome = insidePath(home, volume.Name);
+      return {
+        id: device.toLowerCase(), name: device, mount: volume.Name, mounts: [], device,
+        fstype: volume.DriveFormat, label: volume.VolumeLabel,
+        readOnly: volume.Kind !== "Fixed" || volume.DriveFormat !== "NTFS",
+        home: isHome, system: isSystem, kind: isSystem || isHome ? "main" : "data",
+      };
+    });
+    drives.sort((a, b) => Number(b.home) - Number(a.home) || Number(b.system) - Number(a.system) ||
+      a.name.localeCompare(b.name));
+    return { drives, unmounted: [] };
+  }
 
   const all = readMounts();
   const devices = await blockDevices();
@@ -297,6 +315,12 @@ export function pickDrive(wanted: string | undefined, drives: Drive[]): Drive | 
   const named = drives.find((d) => [d.name, d.label, d.mount, d.device].includes(wanted));
   if (named) return named;
   if (/^\d+$/.test(wanted)) return drives[Number(wanted) - 1];
+  if (IS_WINDOWS) {
+    const target = resolve(wanted);
+    return drives.find((drive) => drive.mount.toLowerCase() === target.toLowerCase() ||
+      insidePath(target, drive.mount) ||
+      [drive.name, drive.label].some((name) => name.toLowerCase() === wanted.toLowerCase()));
+  }
   if (!isAbsolute(wanted) && !existsSync(wanted)) return undefined;
   const mount = mountOf(resolve(wanted), readMounts());
   return drives.find((d) => d.id === mount?.id);

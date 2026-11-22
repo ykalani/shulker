@@ -1,6 +1,9 @@
 import { basename } from "node:path";
 import { CATEGORIES, CATEGORY, CLEARABLE, type CategoryId } from "../core/categories";
 import { classify, type Label, type Usage } from "../core/classify";
+import { canRecyclePath, deduplicateCleanup, isProtectedPath, windowsCache } from "../core/cleanup-policy";
+import { cleanupExclusion, clearProjectRuleCache, discoverProjectCandidates, freshProjectLabel, gitIgnoreEvidence, projectLabel,
+  recheckProjectCandidate } from "../core/project-rules";
 import {
   cannotRemove,
   demoCulprit,
@@ -23,8 +26,8 @@ import { clean, plan, type Clearable } from "../core/clean";
 import { demoDrives, demoLayout, demoPlan, startDemoScan } from "../core/demo";
 import { listDrives, pickDrive, type Drive, type Partition } from "../core/drives";
 import { size, tilde } from "../core/format";
-import { layoutFor, type Layout } from "../core/layout";
-import { FILE_MANAGER, IS_MAC, OS_NAME } from "../core/platform";
+import { layoutFor, scopedLayout, type Layout } from "../core/layout";
+import { FILE_MANAGER, insidePath, IS_MAC, IS_WINDOWS, OS_NAME } from "../core/platform";
 import { diskSpace, emptySnapshot, measure, startScan, unmeasuredBytes, type Item, type ScanHandle, type ScanSnapshot } from "../core/scan";
 
 export interface Action {
@@ -81,6 +84,11 @@ export interface AppState {
   culprits: Record<string, Culprit | "pending">;
   /** Show only things labelled junk or unused. */
   junkOnly: boolean;
+  projectView: boolean;
+  projectScanning: boolean;
+  projects: Item[];
+  projectBytes: number;
+  gitEvidence: Record<string, Label | null>;
 }
 
 export interface Options {
@@ -88,6 +96,7 @@ export interface Options {
   dryRun: boolean;
   /** Drive to open first: a number, name, mount point or any path on it. */
   drive?: string;
+  path?: string;
 }
 
 type Listener = () => void;
@@ -119,6 +128,11 @@ export class Store {
     usage: {},
     culprits: {},
     junkOnly: false,
+    projectView: false,
+    projectScanning: false,
+    projects: [],
+    projectBytes: 0,
+    gitEvidence: {},
   };
   private listeners = new Set<Listener>();
   private scanHandle: ScanHandle | null = null;
@@ -132,6 +146,9 @@ export class Store {
   private scans = new Map<string, ScanSnapshot>();
   /** Bumped on every drive load, so a slow one that was overtaken is dropped. */
   private loads = 0;
+  private projectsScan: AbortController | null = null;
+  private projectsLoaded = false;
+  private gitPending: string | null = null;
 
   constructor(readonly options: Options) {}
 
@@ -150,6 +167,8 @@ export class Store {
       before.selected !== this.state.selected ||
       before.stack !== this.state.stack ||
       before.children !== this.state.children ||
+      before.projects !== this.state.projects ||
+      before.projectView !== this.state.projectView ||
       before.row !== this.state.row ||
       before.scan.phase !== this.state.scan.phase ||
       before.junkOnly !== this.state.junkOnly
@@ -162,7 +181,16 @@ export class Store {
 
   /** What an item probably is, and why. */
   label(item: Item, state: AppState = this.state): Label {
-    return classify(item, state.selected, state.usage[item.path]);
+    const named = IS_WINDOWS ? windowsCache(item.path) : undefined;
+    const exclusion = !this.options.demo && cleanupExclusion(item.path);
+    if (exclusion) return { verdict: "system", reason: exclusion, cleanup: "blocked" };
+    if (named) return { verdict: "junk", reason: `${named.label} · the tool regenerates it` };
+    if (!this.options.demo && isProtectedPath(item.path)) return {
+      verdict: "system", reason: "Managed by the system or its application.", cleanup: "blocked",
+    };
+    const category = state.projectView ? "documents" : state.selected;
+    const label = classify(item, category, state.usage[item.path]);
+    return label.verdict === "yours" ? state.gitEvidence[item.path] ?? label : label;
   }
 
   toggleJunkOnly() {
@@ -204,6 +232,17 @@ export class Store {
     // Culprits: the highlighted folder first, then the biggest few on screen.
     if (listing) return;
     const entries = this.entries();
+    const current = entries[row];
+    if (current && !this.options.demo && this.label(current).verdict === "yours" &&
+        !(current.path in this.state.gitEvidence) && this.gitPending !== current.path) {
+      const path = current.path;
+      const ticket = this.loads;
+      this.gitPending = path;
+      void gitIgnoreEvidence(path).then((label) => {
+        if (this.gitPending === path) this.gitPending = null;
+        if (ticket === this.loads) this.set({ gitEvidence: { ...this.state.gitEvidence, [path]: label } });
+      });
+    }
     const wanted = [entries[row], ...entries.filter((i) => i.dir).slice(0, 4)].filter(
       (i): i is Item => !!i && !!i.dir && !(i.path in this.state.culprits),
     );
@@ -270,23 +309,29 @@ export class Store {
   // ---- scanning ------------------------------------------------------------
 
   /** Lists the drives again and measures the one on screen from scratch. */
-  rescan() {
+  rescan(note: string | null = null) {
     if (this.state.action || this.state.removing) return;
     this.stopWork();
     forgetAllSizes();
+    clearProjectRuleCache();
     this.scans.clear();
-    this.set({ scan: emptySnapshot(), note: null, stack: [], children: [], listing: false, row: 0, culprits: {} });
+    this.set({ scan: emptySnapshot(), note, stack: [], children: [], listing: false, row: 0,
+      culprits: {}, projects: [], projectBytes: 0, projectScanning: false, gitEvidence: {} });
     const current = this.state.drives[this.state.drive];
     void this.load(async () => {
       const { drives, unmounted } = this.options.demo ? { drives: demoDrives(), unmounted: [] } : await listDrives();
       const keep = current ? drives.findIndex((d) => d.id === current.id) : -1;
-      const asked = pickDrive(this.options.drive, drives);
-      const note = this.options.drive && !asked && !current ? `No drive matches ${this.options.drive}.` : this.state.note;
-      this.set({ drives, unmounted, drive: keep >= 0 ? keep : Math.max(0, drives.indexOf(asked ?? drives[0])), note });
+      const wanted = this.options.path ?? this.options.drive;
+      const asked = pickDrive(wanted, drives);
+      if (wanted && !asked && !current) throw new Error(`No drive matches ${wanted}.`);
+      this.set({ drives, unmounted, drive: keep >= 0 ? keep : Math.max(0, drives.indexOf(asked ?? drives[0])) });
     });
   }
 
   private stopWork() {
+    this.projectsScan?.abort();
+    this.projectsScan = null;
+    this.projectsLoaded = false;
     this.scanHandle?.cancel();
     this.scanHandle = null;
     this.listHandle?.cancel();
@@ -298,36 +343,47 @@ export class Store {
   private async load(before?: () => Promise<void>) {
     const ticket = ++this.loads;
     this.set({ layout: null });
-    await before?.();
-    const drive = this.state.drives[this.state.drive];
-    if (ticket !== this.loads || !drive) return;
-    const layout = this.options.demo ? demoLayout(drive) : await layoutFor(drive);
-    if (ticket !== this.loads) return;
-    this.set({ layout });
-    const cached = this.scans.get(drive.id);
-    if (cached) {
-      this.set({ scan: cached });
-      return;
+    try {
+      await before?.();
+      const drive = this.state.drives[this.state.drive];
+      if (ticket !== this.loads) return;
+      if (!drive) throw new Error("No readable drives found.");
+      const base = this.options.demo ? demoLayout(drive) : await layoutFor(drive);
+      const layout = this.options.path && !this.options.demo ? await scopedLayout(base, this.options.path) : base;
+      if (ticket !== this.loads) return;
+      this.set({ layout, ...(layout.scope && !this.state.projectView ? { selected: layout.roots[0].category } : {}) });
+      const cached = this.scans.get(drive.id);
+      if (cached) {
+        this.set({ scan: cached });
+        if (this.state.projectView) void this.findProjects();
+        return;
+      }
+      const start = this.options.demo ? startDemoScan : startScan;
+      const handle = start(layout, (scan) => {
+        if (this.scanHandle !== handle) return;
+        if (scan.phase === "done") this.scans.set(drive.id, scan);
+        this.set({ scan });
+        if (scan.phase === "done" && this.state.projectView) void this.findProjects();
+      });
+      this.scanHandle = handle;
+      await handle.done;
+    } catch (error) {
+      if (ticket === this.loads) this.set({ note: error instanceof Error ? error.message : String(error),
+        scan: { ...this.state.scan, phase: "done" } });
     }
-    const start = this.options.demo ? startDemoScan : startScan;
-    const handle = start(layout, (scan) => {
-      if (this.scanHandle !== handle) return;
-      if (scan.phase === "done") this.scans.set(drive.id, scan);
-      this.set({ scan });
-    });
-    this.scanHandle = handle;
   }
 
   /** Shows another drive: by index, or relative to this one with step. */
   setDrive(index: number) {
     const { drives, drive, action, removing } = this.state;
-    if (action || removing || drives.length < 2) return;
+    if (action || removing || drives.length < 2 || this.options.path) return;
     const next = ((index % drives.length) + drives.length) % drives.length;
     if (next === drive) return;
     // Keep what the current drive's scan knows, deletions included.
     if (this.state.scan.phase === "done") this.scans.set(drives[drive].id, this.state.scan);
     this.stopWork();
-    this.set({ drive: next, scan: emptySnapshot(), note: null, stack: [], children: [], listing: false, row: 0, pane: "sidebar" });
+    this.set({ drive: next, scan: emptySnapshot(), note: null, stack: [], children: [], listing: false,
+      row: 0, pane: "sidebar", projects: [], projectBytes: 0, projectScanning: false });
     void this.load();
   }
 
@@ -343,24 +399,32 @@ export class Store {
 
   /** Shows a category in the detail pane, back at its top level. */
   select(id: CategoryId, pane: Pane = this.state.pane) {
-    if (id === this.state.selected && this.state.stack.length === 0) {
+    if (!this.state.projectView && id === this.state.selected && this.state.stack.length === 0) {
       if (pane !== this.state.pane) this.set({ pane });
       return;
     }
     this.listHandle?.cancel();
     this.dropCulpritWork();
     this.clearConfirm();
-    this.set({ selected: id, stack: [], children: [], listing: false, row: 0, pane });
+    this.set({ selected: id, stack: [], children: [], listing: false, row: 0, pane, projectView: false });
   }
 
   moveCategory(delta: number) {
+    if (this.state.projectView) {
+      if (delta < 0) this.select(CATEGORIES[CATEGORIES.length - 1].id, "sidebar");
+      return;
+    }
     const index = CATEGORIES.findIndex((c) => c.id === this.state.selected);
+    if (index === CATEGORIES.length - 1 && delta > 0) {
+      this.toggleProjects();
+      return;
+    }
     const next = CATEGORIES[Math.max(0, Math.min(CATEGORIES.length - 1, index + delta))];
     this.select(next.id, "sidebar");
   }
 
   setPane(pane: Pane) {
-    if (pane === "list" && this.entries().length === 0) return;
+    if (pane === "list" && this.entries().length === 0 && !this.state.projectView) return;
     if (pane !== this.state.pane) this.set({ pane });
   }
 
@@ -372,12 +436,61 @@ export class Store {
 
   /** Every entry, including those past the drawing limit. */
   allEntries(state: AppState = this.state): Item[] {
-    const list = state.stack.length === 0 ? state.scan.items[state.selected] : state.children;
+    const list = state.stack.length === 0 ? (state.projectView ? state.projects : state.scan.items[state.selected]) : state.children;
     if (!state.junkOnly) return list;
     return list.filter((item) => {
       const { verdict } = this.label(item, state);
       return verdict === "junk" || verdict === "unused";
     });
+  }
+
+  toggleProjects() {
+    if (this.state.action || this.state.removing) return;
+    if (this.state.projectView) {
+      this.select(this.state.selected, "sidebar");
+      return;
+    }
+    this.listHandle?.cancel();
+    this.dropCulpritWork();
+    this.clearConfirm();
+    this.set({ projectView: true, pane: "list", junkOnly: false, stack: [], children: [],
+      listing: false, row: 0, note: null });
+    void this.findProjects();
+  }
+
+  private async findProjects() {
+    const { layout, scan } = this.state;
+    if (!layout || scan.phase !== "done" || this.projectsLoaded || this.projectsScan) return;
+    if (this.options.demo) {
+      const projects = deduplicateCleanup([...scan.items.caches, ...scan.items.developer].slice(0, 8));
+      this.set({ projects, projectBytes: projects.reduce((total, item) => total + item.size, 0) });
+      this.projectsLoaded = true;
+      return;
+    }
+    const controller = new AbortController();
+    this.projectsScan = controller;
+    this.set({ projectScanning: true });
+    const roots = layout.roots.filter((root) => root.category !== "system" && root.category !== "trash")
+      .map((root) => root.path);
+    try {
+      const { candidates, truncated } = await discoverProjectCandidates(roots, {
+        signal: controller.signal, skip: (path) => layout.skip(path) || (!roots.includes(path) && isProtectedPath(path)),
+      });
+      if (controller.signal.aborted) return;
+      const caches = scan.items.caches.filter((item) => !cleanupExclusion(item.path) &&
+        (!IS_WINDOWS || !!windowsCache(item.path)));
+      const projects = deduplicateCleanup([...caches, ...candidates]);
+      this.projectsLoaded = true;
+      this.set({ projects, projectBytes: projects.reduce((total, item) => total + item.size, 0),
+        ...(truncated ? { note: "Cleanup search reached its directory limit. Scan a smaller folder with --path." } : {}) });
+    } catch (error) {
+      if (!controller.signal.aborted) this.set({ note: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (this.projectsScan === controller) {
+        this.projectsScan = null;
+        this.set({ projectScanning: false });
+      }
+    }
   }
 
   /** Bytes in the current list labelled junk, and labelled unused. */
@@ -460,7 +573,8 @@ export class Store {
     const left = stack[stack.length - 1];
     const rest = stack.slice(0, -1);
     if (rest.length === 0) {
-      const row = Math.max(0, this.state.scan.items[this.state.selected].findIndex((i) => i.path === left.path));
+      const list = this.state.projectView ? this.state.projects : this.state.scan.items[this.state.selected];
+      const row = Math.max(0, list.findIndex((i) => i.path === left.path));
       this.set({ stack: [], children: [], listing: false, row });
       return;
     }
@@ -515,9 +629,21 @@ export class Store {
     const { layout, selected } = this.state;
     if (!layout) return "Still working out this drive.";
     if (layout.lookOnly) return layout.lookOnly.charAt(0).toUpperCase() + layout.lookOnly.slice(1) + ".";
-    if (selected === "system") return IS_MAC ? "macOS manages System data." : `${OS_NAME} manages System data · the label says how to shrink it.`;
+    if (selected === "system" && !this.state.projectView) return IS_MAC ? "macOS manages System data." : `${OS_NAME} manages System data · the label says how to shrink it.`;
     if (this.options.demo) return null;
-    return cannotRemove(item.path, layout);
+    const exclusion = cleanupExclusion(item.path);
+    if (exclusion) return exclusion;
+    const cache = IS_WINDOWS && !!windowsCache(item.path);
+    if (!canRecyclePath(item.path, cache)) return "Protected by the system or the application that owns it.";
+    const project = projectLabel(item);
+    if (project?.cleanup === "blocked") return project.reason;
+    if (!cache && this.state.projectView && !project) {
+      return "Only verified project artifacts and named caches can be recycled.";
+    }
+    if (!cache && !project && this.state.gitEvidence[item.path]?.cleanup === "blocked") {
+      return "Git ignore status is review context.";
+    }
+    return cannotRemove(item.path, layout, project?.cleanup === "rebuildable" || project?.cleanup === "review");
   }
 
   async reveal(row = this.state.row) {
@@ -536,7 +662,7 @@ export class Store {
   }
 
   /** First press arms, second press within a few seconds removes. */
-  removeItem(row = this.state.row) {
+  removeItem(row = this.state.row, confirmed = false) {
     const { state } = this;
     if (state.action || state.removing || state.scan.phase !== "done") return;
     const item = this.entries()[row];
@@ -545,11 +671,12 @@ export class Store {
       this.set({ note: reason });
       return;
     }
-    if (state.confirm?.kind === "item" && state.confirm.path === item.path) {
+    if (confirmed && state.confirm?.kind === "item" && state.confirm.path === item.path) {
       this.clearConfirm();
       void this.runRemove(item);
       return;
     }
+    if (confirmed) return;
     this.arm({ kind: "item", path: item.path });
     if (row !== state.row) this.set({ row, pane: "list" });
   }
@@ -558,7 +685,10 @@ export class Store {
     const category = this.state.selected;
     const layout = this.state.layout;
     if (!layout) return;
-    const forGood = deletesForGood(category);
+    const projectView = this.state.projectView;
+    const project = freshProjectLabel(item);
+    const artifact = project?.cleanup === "rebuildable" || project?.cleanup === "review";
+    const forGood = !artifact && !projectView && deletesForGood(category);
     this.set({ removing: item.path, note: null });
 
     let ok = true;
@@ -568,8 +698,14 @@ export class Store {
       await new Promise((done) => setTimeout(done, 450));
     } else {
       try {
+        if (project?.cleanup === "blocked" || (projectView && !artifact && !(IS_WINDOWS && windowsCache(item.path)))) {
+          throw new Error("Cleanup eligibility changed. Rescan and review the item again.");
+        }
+        if (artifact && !IS_WINDOWS && !(await recheckProjectCandidate(item, layout.foreign))) {
+          throw new Error("Project evidence or contents changed. Rescan and review the item again.");
+        }
         if (forGood) await deleteForGood(item.path, category);
-        else trashed = await moveToTrash(item.path, layout);
+        else trashed = await moveToTrash(item.path, layout, artifact);
       } catch (e) {
         ok = false;
         error = e instanceof Error ? e.message : String(e);
@@ -588,11 +724,23 @@ export class Store {
       return;
     }
 
+    if (projectView && !this.pretend) {
+      this.set({ removing: null });
+      this.rescan(`Moved ${basename(item.path)} to ${IS_WINDOWS ? "the Recycle Bin" : "Trash"}. Space stays occupied until emptied.`);
+      return;
+    }
+    if (projectView) {
+      const projects = this.state.projects.filter((candidate) => candidate.path !== item.path);
+      this.set({ projects, projectBytes: projects.reduce((total, candidate) => total + candidate.size, 0),
+        removing: null, row: Math.max(0, Math.min(this.state.row, projects.length - 1)),
+        note: `Demo: would move ${basename(item.path)} to Trash.` });
+      return;
+    }
     // Anything measured above or inside it is out of date now.
     forgetSizes(item.path);
     const culprits = { ...this.state.culprits };
     for (const path of Object.keys(culprits)) {
-      if (path === item.path || item.path.startsWith(path + "/")) delete culprits[path];
+      if (path === item.path || insidePath(item.path, path)) delete culprits[path];
     }
     this.state = { ...this.state, culprits };
 
@@ -602,7 +750,7 @@ export class Store {
     const sizes = { ...scan.sizes, [category]: Math.max(0, scan.sizes[category] - item.size) };
     const items = { ...scan.items, [category]: drop(scan.items[category]) };
     const shrink = (list: Item[]) =>
-      list.map((i) => (item.path.startsWith(i.path + "/") ? { ...i, size: Math.max(0, i.size - item.size) } : i));
+      list.map((i) => (insidePath(item.path, i.path) ? { ...i, size: Math.max(0, i.size - item.size) } : i));
     items[category] = shrink(items[category]);
     const nextStack = stack.map((level) => ({ ...level, size: Math.max(0, level.size - item.size) }));
 
@@ -616,7 +764,7 @@ export class Store {
       // Still on disk, only in the Trash now.
       sizes.trash += item.size;
       measured += item.size - (scan.sizes[category] - sizes[category]);
-      items.trash = [{ path: trashed, size: item.size, dir: item.dir }, ...items.trash].sort((a, b) => b.size - a.size);
+      if (!IS_WINDOWS) items.trash = [{ path: trashed, size: item.size, dir: item.dir }, ...items.trash].sort((a, b) => b.size - a.size);
     }
     if (this.options.demo && forGood) {
       const taken = Math.min(item.size, scan.used);
@@ -624,11 +772,12 @@ export class Store {
     } else if (!this.pretend) {
       const after = await diskSpace(layout.drive);
       if (after.total > 0) space = { ...scan, ...after };
-      sizes.system += unmeasuredBytes({ ...space, measured }) - unmeasuredBytes(scan);
+      if (!layout.scope) sizes.system += unmeasuredBytes({ ...space, measured }) - unmeasuredBytes(scan);
     }
 
     const list = stack.length === 0 ? items[category] : drop(children);
-    const verb = forGood ? "Deleted" : "Moved to Trash:";
+    const trashName = IS_WINDOWS ? "the Recycle Bin" : "Trash";
+    const verb = forGood ? "Deleted" : `Moved to ${trashName}:`;
     const prefix = this.pretend ? "Dry run, nothing changed. Would have " + (forGood ? "deleted" : "moved to Trash") : verb;
     this.set({
       scan: { ...space, sizes, items, measured },
@@ -637,7 +786,7 @@ export class Store {
       row: Math.min(this.state.row, Math.max(0, Math.min(list.length, MAX_ROWS) - 1)),
       removing: null,
       freed,
-      note: `${prefix} ${basename(item.path)} (${size(item.size)}).${forGood || this.pretend ? "" : " Empty the Trash to get the space back."}`,
+      note: `${prefix} ${basename(item.path)} (${size(item.size)}).${forGood || this.pretend ? "" : " Space stays occupied until the bin is emptied."}`,
     });
   }
 
@@ -653,18 +802,30 @@ export class Store {
 
   canClear(id: CategoryId): id is Clearable {
     const { layout, scan } = this.state;
-    return !!layout && !layout.lookOnly && (CLEARABLE as CategoryId[]).includes(id) && scan.sizes[id] >= WORTH_CLEARING;
+    return !!layout && !layout.lookOnly && !layout.scope && (!IS_WINDOWS || this.options.demo) &&
+      !this.state.projectView && (CLEARABLE as CategoryId[]).includes(id) && scan.sizes[id] >= WORTH_CLEARING;
+  }
+
+  pressCategory() {
+    if (this.canClear(this.state.selected)) this.press(this.state.selected);
+    else this.set({ note: "Select an individual cleanup candidate to review removal." });
+  }
+
+  confirmAction() {
+    const confirm = this.state.confirm;
+    if (confirm?.kind === "category") this.press(confirm.id, true);
+    else if (confirm?.kind === "item") this.removeItem(this.state.row, true);
   }
 
   /** First press arms the button, second press within a few seconds clears. */
-  press(id: Clearable) {
+  press(id: Clearable, confirmed = false) {
     if (this.state.action || this.state.removing || this.state.scan.phase !== "done") return;
-    if (this.state.confirm?.kind === "category" && this.state.confirm.id === id) {
+    if (confirmed && this.state.confirm?.kind === "category" && this.state.confirm.id === id) {
       this.clearConfirm();
       void this.run(id);
       return;
     }
-    this.arm({ kind: "category", id });
+    if (!confirmed) this.arm({ kind: "category", id });
   }
 
   private arm(confirm: NonNullable<AppState["confirm"]>) {
@@ -742,8 +903,7 @@ export class Store {
   }
 
   stop() {
-    this.scanHandle?.cancel();
-    this.listHandle?.cancel();
-    if (this.confirmTimer) clearTimeout(this.confirmTimer);
+    this.loads++;
+    this.stopWork();
   }
 }

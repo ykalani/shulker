@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { IS_MAC } from "./platform";
+import { IS_MAC, IS_WINDOWS } from "./platform";
 
 export type CategoryId =
   | "apps"
@@ -37,7 +37,7 @@ export const CATEGORIES: Category[] = [
     name: "Apps",
     color: [59, 130, 246],
     tier: "review",
-    blurb: IS_MAC
+    blurb: IS_MAC || IS_WINDOWS
       ? "Applications and the data they keep."
       : "Applications and the data they keep: /opt, Flatpak, Snap, ~/.local/share, ~/.config.",
   },
@@ -61,7 +61,7 @@ export const CATEGORIES: Category[] = [
     name: "Documents",
     color: [34, 211, 238],
     tier: "review",
-    blurb: IS_MAC
+    blurb: IS_MAC || IS_WINDOWS
       ? "Documents, Desktop, Downloads and other folders in your home."
       : "Documents, Desktop, Downloads, other folders in your home, and loose files on other drives.",
   },
@@ -71,7 +71,7 @@ export const CATEGORIES: Category[] = [
     name: "System data",
     color: [156, 163, 175],
     tier: "keep",
-    blurb: IS_MAC
+    blurb: IS_WINDOWS ? "Windows, system-managed files, and protected data." : IS_MAC
       ? "macOS, logs, snapshots and anything this scan cannot read. The system manages these."
       : "The system, packages, logs, swap, snapshots and anything this scan cannot read. Your package manager handles these.",
   },

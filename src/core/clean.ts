@@ -2,9 +2,11 @@ import { promises as fsp } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { CategoryId } from "./categories";
 import type { Layout } from "./layout";
-import { IS_MAC } from "./platform";
+import { IS_MAC, IS_WINDOWS } from "./platform";
 import type { Item } from "./scan";
 import { forgetTrashInfo } from "./trash";
+import { cleanupExclusion } from "./project-rules";
+import { canRecyclePath } from "./cleanup-policy";
 
 export type Clearable = Extract<CategoryId, "caches" | "trash">;
 
@@ -72,10 +74,15 @@ function inside(category: Clearable, path: string, layout: Layout): boolean {
 
 export async function clean(category: Clearable, items: Item[], layout: Layout, options: CleanOptions = {}): Promise<CleanResult> {
   const result: CleanResult = { freed: 0, removed: 0, skipped: [] };
+  if (IS_WINDOWS) {
+    result.skipped = items.map((item) => item.path);
+    return result;
+  }
 
   for (const item of items) {
     let freed = 0;
-    if (layout.lookOnly || !inside(category, item.path, layout) || layout.foreign(item.path)) {
+    if (layout.lookOnly || !inside(category, item.path, layout) || layout.foreign(item.path) ||
+        cleanupExclusion(item.path) || !canRecyclePath(item.path)) {
       result.skipped.push(item.path);
     } else if (options.dryRun) {
       await sleep(25 + Math.min(120, item.size / 2e7));

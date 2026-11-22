@@ -18,6 +18,7 @@ export function capacity(bytes: number): string {
 export function size(bytes: number): string {
   if (bytes >= GB) return gb(bytes);
   if (bytes >= MB) return `${Math.round(bytes / MB)} MB`;
+  if (bytes < 1000) return `${Math.max(0, bytes)} B`;
   return `${Math.max(0, Math.round(bytes / 1e3))} KB`;
 }
 
@@ -34,7 +35,7 @@ const REAL_HOME = (() => {
 /** Replaces the home directory with ~ so paths stay short. */
 export function tilde(path: string, home: string = HOME): string {
   for (const h of home === HOME ? [HOME, REAL_HOME] : [home]) {
-    if (path === h || path.startsWith(h + "/")) return "~" + path.slice(h.length);
+    if (path === h || path.startsWith(h + "/") || path.startsWith(h + "\\")) return "~" + path.slice(h.length);
   }
   return path;
 }
