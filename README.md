@@ -1,6 +1,6 @@
 # Shulker
 
-Shulker is a terminal dashboard for exploring disk usage and reviewing cleanup candidates on Windows, macOS, and Linux. It builds on [fix-storage](https://github.com/govijr/fix-storage), with a redesigned terminal UI and a Windows backend.
+Shulker is a terminal dashboard for exploring disk usage and reviewing cleanup candidates on Windows, macOS, and Linux. It builds on [fix-storage](https://github.com/govijr/fix-storage), with its borderless dashboard and original animated disk meter adapted to terminal cells, plus a Windows backend.
 
 ## Run it
 

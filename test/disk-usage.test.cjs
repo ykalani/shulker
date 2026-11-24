@@ -8,6 +8,7 @@ const { diskSpace, emptySnapshot, startScan } = require("../dist/core/scan");
 const { toJson, toText } = require("../dist/plain");
 const { diskSegments } = require("../dist/ui/bar");
 const { frame } = require("../dist/ui/terminal");
+const { startupDuration, startupFrame } = require("../dist/ui/startup");
 const { Store } = require("../dist/ui/store");
 
 const drive = demoDrives()[0];
@@ -74,6 +75,22 @@ test("the meter includes occupied space that has not been measured", () => {
   assert.equal(segments.at(-1).fraction, 0.3);
 });
 
+test("startup lifts the lid without shifting the box base or overflowing the terminal", () => {
+  const clean = (lines) => lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
+  const closed = clean(startupFrame(0, 80, 24));
+  const open = clean(startupFrame(startupDuration - 1, 80, 24));
+  const lid = (lines) => lines.findIndex((line) => line.includes(".----------------------."));
+  const base = (lines) => lines.findIndex((line) => line.includes("o       o"));
+  assert(lid(open) < lid(closed));
+  assert.equal(base(open), base(closed));
+  assert(open.some((line) => line.includes("S H U L K E R")));
+  assert(open.length < 24 && open.every((line) => line.length < 80));
+  const compact = clean(startupFrame(1_000, 30, 10));
+  assert(compact.some((line) => line.includes("* +  *")));
+  assert(compact.length < 10 && compact.every((line) => line.length < 30));
+  assert.equal(startupFrame(0, 14, 6), undefined);
+});
+
 test("demo maintains volume totals and renders visible storage and cleanup panes", { timeout: 10_000 }, async (t) => {
   const store = new Store({ demo: true, dryRun: true });
   t.after(() => store.stop());
@@ -83,14 +100,19 @@ test("demo maintains volume totals and renders visible storage and cleanup panes
   assert.equal(scan.measured, space.used);
   Object.assign(store, { state: { ...store.get(), drive: 0, drives: [drive], scan, layout } });
   const display = () => frame(store, 90, 26).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-  assert.match(display(), /SHULKER/);
-  assert.match(display(), /STORAGE +│ +Apps/);
+  assert.match(display(), /shulker/);
+  assert.match(display(), /categories +Apps/);
+  assert.match(display(), /[\u2801-\u28ff]/u);
+  for (const [columns, rows] of [[35, 16], [80, 24], [140, 35]]) {
+    const lines = frame(store, columns, rows).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
+    assert(lines.length < rows && lines.every((line) => [...line].length < columns));
+  }
   store.toggleProjects();
   assert.match(display(), /Cleanup candidates/);
   store.removeItem();
   store.removeItem();
   assert.equal(store.get().removing, null);
-  assert.match(display(), /Press Y to confirm removal/);
+  assert.match(display(), /y confirm move to (the )?(Recycle Bin|Trash)/);
   const confirmation = new Promise((resolve) => {
     const unsubscribe = store.subscribe(() => {
       if (store.get().removing || !store.get().note) return;
